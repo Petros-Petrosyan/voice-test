@@ -1,38 +1,145 @@
-.App {
-  text-align: center;
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
 }
 
-.App-logo {
-  height: 40vmin;
-  pointer-events: none;
+body {
+  background: #0f1117;
+  color: #e2e8f0;
+  font-family: system-ui, -apple-system, sans-serif;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  .App-logo {
-    animation: App-logo-spin infinite 20s linear;
-  }
-}
-
-.App-header {
-  background-color: #282c34;
+.app {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  font-size: calc(10px + 2vmin);
-  color: white;
+  gap: 2rem;
 }
 
-.App-link {
-  color: #61dafb;
+.app-title {
+  font-size: 1.5rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  color: #94a3b8;
 }
 
-@keyframes App-logo-spin {
-  from {
-    transform: rotate(0deg);
-  }
-  to {
-    transform: rotate(360deg);
-  }
+/* ── Mic button ─────────────────────────────────────────── */
+
+.mic-button {
+  position: relative;
+  width: 120px;
+  height: 120px;
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.1s, box-shadow 0.2s, background 0.2s;
+  outline: none;
+}
+
+.mic-button svg {
+  width: 52px;
+  height: 52px;
+}
+
+/* idle */
+.mic-button--idle {
+  background: #1e293b;
+  box-shadow: 0 0 0 0 rgba(99, 102, 241, 0);
+  color: #94a3b8;
+}
+.mic-button--idle:hover {
+  background: #273549;
+  color: #e2e8f0;
+}
+.mic-button--idle:active {
+  transform: scale(0.95);
+}
+
+/* recording — pulsing red */
+.mic-button--recording {
+  background: #dc2626;
+  color: #fff;
+  animation: pulse-record 1.2s ease-in-out infinite;
+}
+
+/* processing — spinning border */
+.mic-button--processing {
+  background: #1e293b;
+  color: #6366f1;
+  cursor: not-allowed;
+  animation: spin-border 1s linear infinite;
+  box-shadow:
+    0 0 0 4px #0f1117,
+    0 0 0 6px #6366f1;
+}
+
+/* playing — gentle glow */
+.mic-button--playing {
+  background: #0f766e;
+  color: #fff;
+  cursor: not-allowed;
+  animation: glow-play 1.5s ease-in-out infinite alternate;
+}
+
+/* error — subtle red tint */
+.mic-button--error {
+  background: #450a0a;
+  color: #fca5a5;
+}
+
+.mic-button:disabled {
+  pointer-events: none;
+}
+
+/* ── Animations ─────────────────────────────────────────── */
+
+@keyframes pulse-record {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.6); }
+  50%       { box-shadow: 0 0 0 20px rgba(220, 38, 38, 0); }
+}
+
+@keyframes spin-border {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+@keyframes glow-play {
+  from { box-shadow: 0 0 12px 4px rgba(20, 184, 166, 0.4); }
+  to   { box-shadow: 0 0 28px 12px rgba(20, 184, 166, 0.15); }
+}
+
+/* ── Status label ───────────────────────────────────────── */
+
+.status-label {
+  font-size: 0.95rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #64748b;
+  min-height: 1.4em;
+  transition: color 0.2s;
+}
+
+.mic-button--recording ~ .status-label { color: #f87171; }
+.mic-button--processing ~ .status-label { color: #818cf8; }
+.mic-button--playing ~ .status-label { color: #2dd4bf; }
+
+/* ── Error message ──────────────────────────────────────── */
+
+.error-msg {
+  max-width: 340px;
+  text-align: center;
+  font-size: 0.85rem;
+  color: #fca5a5;
+  background: #1c0a0a;
+  border: 1px solid #7f1d1d;
+  border-radius: 8px;
+  padding: 0.6rem 1rem;
 }
