@@ -18,8 +18,9 @@ function mergeChunks(chunks) {
 }
 
 export default function App() {
-  const [status, setStatus] = useState('idle'); // idle | recording | processing | playing | error
+  const [status, setStatus] = useState('idle'); // idle | recording | processing | playing | playingMyVoice | error
   const [errorMsg, setErrorMsg] = useState('');
+  const [hasRecording, setHasRecording] = useState(false);
 
   const audioCtxRef = useRef(null);
   const streamRef = useRef(null);
@@ -27,6 +28,8 @@ export default function App() {
   const sourceRef = useRef(null);
   const chunksRef = useRef([]);
   const isRecordingRef = useRef(false);
+  const lastRecordingRef = useRef(null); // { float32: Float32Array, sampleRate: number }
+  const myVoiceSourceRef = useRef(null);
 
   const getAudioContext = useCallback(() => {
     if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
@@ -37,6 +40,8 @@ export default function App() {
 
   const startRecording = useCallback(async () => {
     setErrorMsg('');
+    lastRecordingRef.current = null;
+    setHasRecording(false);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
       streamRef.current = stream;
@@ -82,6 +87,9 @@ export default function App() {
     const inputSampleRate = audioCtx.sampleRate;
     const merged = mergeChunks(chunksRef.current);
     chunksRef.current = [];
+
+    lastRecordingRef.current = { float32: merged, sampleRate: inputSampleRate };
+    setHasRecording(true);
 
     const downsampled = downsample(merged, inputSampleRate, TARGET_SAMPLE_RATE);
     const pcmBuffer = floatToPcm16(downsampled);
@@ -147,13 +155,34 @@ export default function App() {
     [status, stopRecordingAndSend]
   );
 
-  const isDisabled = status === 'processing' || status === 'playing';
+  const playMyVoice = useCallback(() => {
+    if (!lastRecordingRef.current) return;
+    const { float32, sampleRate } = lastRecordingRef.current;
+    const audioCtx = getAudioContext();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+
+    myVoiceSourceRef.current?.stop();
+
+    const audioBuffer = audioCtx.createBuffer(1, float32.length, sampleRate);
+    audioBuffer.getChannelData(0).set(float32);
+
+    const src = audioCtx.createBufferSource();
+    src.buffer = audioBuffer;
+    src.connect(audioCtx.destination);
+    src.onended = () => setStatus((s) => s === 'playingMyVoice' ? 'idle' : s);
+    src.start();
+    myVoiceSourceRef.current = src;
+    setStatus('playingMyVoice');
+  }, [getAudioContext]);
+
+  const isDisabled = status === 'processing' || status === 'playing' || status === 'playingMyVoice';
 
   const statusLabel = {
     idle: 'Hold to Speak',
     recording: 'Recording…',
     processing: 'Processing…',
     playing: 'Playing Response…',
+    playingMyVoice: 'Playing Your Voice…',
     error: 'Hold to Speak',
   }[status];
 
@@ -176,6 +205,17 @@ export default function App() {
       </button>
 
       <p className="status-label">{statusLabel}</p>
+
+      {hasRecording && (
+        <button
+          className={`play-voice-button${status === 'playingMyVoice' ? ' play-voice-button--active' : ''}`}
+          onClick={playMyVoice}
+          disabled={isDisabled && status !== 'playingMyVoice'}
+          aria-label="Play my voice"
+        >
+          ▶ Play My Voice
+        </button>
+      )}
 
       {status === 'error' && errorMsg && (
         <p className="error-msg">{errorMsg}</p>
