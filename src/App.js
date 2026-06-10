@@ -1,9 +1,9 @@
-import { useRef, useState, useCallback } from 'react';
-import './App.css';
-import { downsample, floatToPcm16, pcm16ToAudioBuffer } from './audioUtils';
+import { useCallback, useRef, useState } from "react";
+import "./App.css";
+import { downsample, floatToPcm16, pcm16ToAudioBuffer } from "./audioUtils";
 
 const TARGET_SAMPLE_RATE = 16000;
-const SERVER_URL = 'http://localhost:3001/buffer';
+const SERVER_URL = "http://localhost:3001/buffer";
 
 // Collect all Float32 chunks from a ScriptProcessorNode into one flat array.
 function mergeChunks(chunks) {
@@ -18,8 +18,8 @@ function mergeChunks(chunks) {
 }
 
 export default function App() {
-  const [status, setStatus] = useState('idle'); // idle | recording | processing | playing | playingMyVoice | error
-  const [errorMsg, setErrorMsg] = useState('');
+  const [status, setStatus] = useState("idle"); // idle | recording | processing | playing | playingMyVoice | playingServerVoice | error
+  const [errorMsg, setErrorMsg] = useState("");
   const [hasRecording, setHasRecording] = useState(false);
 
   const audioCtxRef = useRef(null);
@@ -28,26 +28,30 @@ export default function App() {
   const sourceRef = useRef(null);
   const chunksRef = useRef([]);
   const isRecordingRef = useRef(false);
-  const lastRecordingRef = useRef(null); // { float32: Float32Array, sampleRate: number }
+  const lastRecordingRef = useRef(null); // { float32: Float32Array, sampleRate: number, downsampled: Float32Array }
   const myVoiceSourceRef = useRef(null);
+  const serverVoiceSourceRef = useRef(null);
 
   const getAudioContext = useCallback(() => {
-    if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
+    if (!audioCtxRef.current || audioCtxRef.current.state === "closed") {
       audioCtxRef.current = new AudioContext();
     }
     return audioCtxRef.current;
   }, []);
 
   const startRecording = useCallback(async () => {
-    setErrorMsg('');
+    setErrorMsg("");
     lastRecordingRef.current = null;
     setHasRecording(false);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+        video: false,
+      });
       streamRef.current = stream;
 
       const audioCtx = getAudioContext();
-      if (audioCtx.state === 'suspended') await audioCtx.resume();
+      if (audioCtx.state === "suspended") await audioCtx.resume();
 
       const source = audioCtx.createMediaStreamSource(stream);
       sourceRef.current = source;
@@ -61,16 +65,18 @@ export default function App() {
       processor.onaudioprocess = (e) => {
         if (!isRecordingRef.current) return;
         // Copy the channel data — the buffer is reused after this callback returns
-        chunksRef.current.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+        chunksRef.current.push(
+          new Float32Array(e.inputBuffer.getChannelData(0)),
+        );
       };
 
       source.connect(processor);
       processor.connect(audioCtx.destination);
 
-      setStatus('recording');
+      setStatus("recording");
     } catch (err) {
       setErrorMsg(`Microphone error: ${err.message}`);
-      setStatus('error');
+      setStatus("error");
     }
   }, [getAudioContext]);
 
@@ -94,72 +100,84 @@ export default function App() {
     const downsampled = downsample(merged, inputSampleRate, TARGET_SAMPLE_RATE);
     const pcmBuffer = floatToPcm16(downsampled);
 
-    setStatus('processing');
+    lastRecordingRef.current = {
+      float32: merged,
+      sampleRate: inputSampleRate,
+      downsampled,
+    };
+
+    setStatus("processing");
 
     try {
       const response = await fetch(SERVER_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/octet-stream' },
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
         body: pcmBuffer,
       });
 
       if (!response.ok) {
-        throw new Error(`Server responded with ${response.status} ${response.statusText}`);
+        throw new Error(
+          `Server responded with ${response.status} ${response.statusText}`,
+        );
       }
 
       const responseBuffer = await response.arrayBuffer();
       if (responseBuffer.byteLength === 0) {
-        setStatus('idle');
+        setStatus("idle");
         return;
       }
 
-      setStatus('playing');
-      const audioBuffer = pcm16ToAudioBuffer(responseBuffer, audioCtx, TARGET_SAMPLE_RATE);
+      setStatus("playing");
+      const audioBuffer = pcm16ToAudioBuffer(
+        responseBuffer,
+        audioCtx,
+        TARGET_SAMPLE_RATE,
+      );
       const playbackSource = audioCtx.createBufferSource();
       playbackSource.buffer = audioBuffer;
       playbackSource.connect(audioCtx.destination);
-      playbackSource.onended = () => setStatus('idle');
+      playbackSource.onended = () => setStatus("idle");
       playbackSource.start();
     } catch (err) {
       setErrorMsg(`Request failed: ${err.message}`);
-      setStatus('error');
+      setStatus("error");
     }
   }, [getAudioContext]);
 
   const handleMouseDown = useCallback(() => {
-    if (status === 'idle' || status === 'error') startRecording();
+    if (status === "idle" || status === "error") startRecording();
   }, [status, startRecording]);
 
   const handleMouseUp = useCallback(() => {
-    if (status === 'recording') stopRecordingAndSend();
+    if (status === "recording") stopRecordingAndSend();
   }, [status, stopRecordingAndSend]);
 
   // Keyboard accessibility: Space / Enter to hold-to-speak
   const handleKeyDown = useCallback(
     (e) => {
-      if ((e.key === ' ' || e.key === 'Enter') && !e.repeat) {
+      if ((e.key === " " || e.key === "Enter") && !e.repeat) {
         e.preventDefault();
-        if (status === 'idle' || status === 'error') startRecording();
+        if (status === "idle" || status === "error") startRecording();
       }
     },
-    [status, startRecording]
+    [status, startRecording],
   );
 
   const handleKeyUp = useCallback(
     (e) => {
-      if (e.key === ' ' || e.key === 'Enter') {
+      if (e.key === " " || e.key === "Enter") {
         e.preventDefault();
-        if (status === 'recording') stopRecordingAndSend();
+        if (status === "recording") stopRecordingAndSend();
       }
     },
-    [status, stopRecordingAndSend]
+    [status, stopRecordingAndSend],
   );
 
   const playMyVoice = useCallback(() => {
     if (!lastRecordingRef.current) return;
     const { float32, sampleRate } = lastRecordingRef.current;
     const audioCtx = getAudioContext();
-    if (audioCtx.state === 'suspended') audioCtx.resume();
+    if (audioCtx.state === "suspended") audioCtx.resume();
 
     myVoiceSourceRef.current?.stop();
 
@@ -169,21 +187,51 @@ export default function App() {
     const src = audioCtx.createBufferSource();
     src.buffer = audioBuffer;
     src.connect(audioCtx.destination);
-    src.onended = () => setStatus((s) => s === 'playingMyVoice' ? 'idle' : s);
+    src.onended = () => setStatus((s) => (s === "playingMyVoice" ? "idle" : s));
     src.start();
     myVoiceSourceRef.current = src;
-    setStatus('playingMyVoice');
+    setStatus("playingMyVoice");
   }, [getAudioContext]);
 
-  const isDisabled = status === 'processing' || status === 'playing' || status === 'playingMyVoice';
+  const playServerVoice = useCallback(() => {
+    if (!lastRecordingRef.current) return;
+    const { downsampled } = lastRecordingRef.current;
+    const audioCtx = getAudioContext();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+
+    serverVoiceSourceRef.current?.stop();
+
+    const audioBuffer = audioCtx.createBuffer(
+      1,
+      downsampled.length,
+      TARGET_SAMPLE_RATE,
+    );
+    audioBuffer.getChannelData(0).set(downsampled);
+
+    const src = audioCtx.createBufferSource();
+    src.buffer = audioBuffer;
+    src.connect(audioCtx.destination);
+    src.onended = () =>
+      setStatus((s) => (s === "playingServerVoice" ? "idle" : s));
+    src.start();
+    serverVoiceSourceRef.current = src;
+    setStatus("playingServerVoice");
+  }, [getAudioContext]);
+
+  const isDisabled =
+    status === "processing" ||
+    status === "playing" ||
+    status === "playingMyVoice" ||
+    status === "playingServerVoice";
 
   const statusLabel = {
-    idle: 'Hold to Speak',
-    recording: 'Recording…',
-    processing: 'Processing…',
-    playing: 'Playing Response…',
-    playingMyVoice: 'Playing Your Voice…',
-    error: 'Hold to Speak',
+    idle: "Hold to Speak",
+    recording: "Recording…",
+    processing: "Processing…",
+    playing: "Playing Response…",
+    playingMyVoice: "Playing Your Voice…",
+    playingServerVoice: "Playing Server Voice…",
+    error: "Hold to Speak",
   }[status];
 
   return (
@@ -194,8 +242,14 @@ export default function App() {
         className={`mic-button mic-button--${status}`}
         onMouseDown={handleMouseDown}
         onMouseUp={handleMouseUp}
-        onTouchStart={(e) => { e.preventDefault(); handleMouseDown(); }}
-        onTouchEnd={(e) => { e.preventDefault(); handleMouseUp(); }}
+        onTouchStart={(e) => {
+          e.preventDefault();
+          handleMouseDown();
+        }}
+        onTouchEnd={(e) => {
+          e.preventDefault();
+          handleMouseUp();
+        }}
         onKeyDown={handleKeyDown}
         onKeyUp={handleKeyUp}
         disabled={isDisabled}
@@ -208,16 +262,27 @@ export default function App() {
 
       {hasRecording && (
         <button
-          className={`play-voice-button${status === 'playingMyVoice' ? ' play-voice-button--active' : ''}`}
+          className={`play-voice-button${status === "playingMyVoice" ? " play-voice-button--active" : ""}`}
           onClick={playMyVoice}
-          disabled={isDisabled && status !== 'playingMyVoice'}
-          aria-label="Play my voice"
+          disabled={isDisabled && status !== "playingMyVoice"}
+          aria-label="Play my original voice"
         >
-          ▶ Play My Voice
+          ▶ Play My Original Voice
         </button>
       )}
 
-      {status === 'error' && errorMsg && (
+      {hasRecording && (
+        <button
+          className={`play-voice-button${status === "playingServerVoice" ? " play-voice-button--active" : ""}`}
+          onClick={playServerVoice}
+          disabled={isDisabled && status !== "playingServerVoice"}
+          aria-label="Play voice that send to server"
+        >
+          ▶ Play Transformed Voice For Server
+        </button>
+      )}
+
+      {status === "error" && errorMsg && (
         <p className="error-msg">{errorMsg}</p>
       )}
     </div>
@@ -227,12 +292,18 @@ export default function App() {
 function MicIcon({ status }) {
   return (
     <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-      {status === 'playing' ? (
+      {status === "playing" ? (
         // Speaker / waveform icon during playback
         <>
           <path d="M3 9v6h4l5 5V4L7 9H3z" />
-          <path d="M16.5 12A4.5 4.5 0 0 0 14 7.97v8.05c1.48-.73 2.5-2.25 2.5-4.02z" opacity=".7" />
-          <path d="M19 12c0 3.31-2.69 6-6 6v2c4.42 0 8-3.58 8-8s-3.58-8-8-8v2c3.31 0 6 2.69 6 6z" opacity=".4" />
+          <path
+            d="M16.5 12A4.5 4.5 0 0 0 14 7.97v8.05c1.48-.73 2.5-2.25 2.5-4.02z"
+            opacity=".7"
+          />
+          <path
+            d="M19 12c0 3.31-2.69 6-6 6v2c4.42 0 8-3.58 8-8s-3.58-8-8-8v2c3.31 0 6 2.69 6 6z"
+            opacity=".4"
+          />
         </>
       ) : (
         // Microphone icon

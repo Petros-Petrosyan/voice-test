@@ -89,7 +89,13 @@ body {
   animation: glow-play 1.5s ease-in-out infinite alternate;
 }
 
-/* playingMyVoice — neutral disabled look */
+/* playingMyVoice / playingServerVoice — neutral disabled look */
+.mic-button--playingServerVoice {
+  background: #1e293b;
+  color: #475569;
+  cursor: not-allowed;
+}
+
 .mic-button--playingMyVoice {
   background: #1e293b;
   color: #475569;
@@ -138,6 +144,7 @@ body {
 .mic-button--processing ~ .status-label { color: #818cf8; }
 .mic-button--playing ~ .status-label { color: #2dd4bf; }
 .mic-button--playingMyVoice ~ .status-label { color: #7dd3fc; }
+.mic-button--playingServerVoice ~ .status-label { color: #86efac; }
 
 /* ── Play My Voice button ───────────────────────────────── */
 
