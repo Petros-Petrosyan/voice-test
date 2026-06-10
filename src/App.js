@@ -1,37 +1,45 @@
 import { useCallback, useRef, useState } from "react";
-import "./App.css";
-import { downsample, floatToPcm16, pcm16ToAudioBuffer } from "./audioUtils";
 
-const TARGET_SAMPLE_RATE = 16000;
-const SERVER_URL = "http://localhost:3001/buffer";
-
-// Collect all Float32 chunks from a ScriptProcessorNode into one flat array.
-function mergeChunks(chunks) {
-  const totalLength = chunks.reduce((sum, c) => sum + c.length, 0);
-  const merged = new Float32Array(totalLength);
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return merged;
-}
+import MicButton from "./components/MicButton";
+import PlaybackButton from "./components/PlaybackButton";
+import {
+  BUFFER_SIZE,
+  SERVER_URL,
+  STATUS,
+  STATUS_LABELS,
+  TARGET_SAMPLE_RATE,
+} from "./constants";
+import "./styles/app.css";
+import {
+  downsample,
+  floatToPcm16,
+  mergeChunks,
+  pcm16ToAudioBuffer,
+} from "./utils/audioUtils";
 
 export default function App() {
-  const [status, setStatus] = useState("idle"); // idle | recording | processing | playing | playingMyVoice | playingServerVoice | error
+  // ── State ──────────────────────────────────────────────────────────────
+  // status drives which CSS styles are active and which buttons are enabled
+  const [status, setStatus] = useState(STATUS.IDLE);
   const [errorMsg, setErrorMsg] = useState("");
-  const [hasRecording, setHasRecording] = useState(false);
+  const [hasRecording, setHasRecording] = useState(false); // show playback buttons after first recording
 
-  const audioCtxRef = useRef(null);
-  const streamRef = useRef(null);
-  const processorRef = useRef(null);
-  const sourceRef = useRef(null);
-  const chunksRef = useRef([]);
-  const isRecordingRef = useRef(false);
-  const lastRecordingRef = useRef(null); // { float32: Float32Array, sampleRate: number, downsampled: Float32Array }
-  const myVoiceSourceRef = useRef(null);
-  const serverVoiceSourceRef = useRef(null);
+  // ── Refs ───────────────────────────────────────────────────────────────
+  // Refs hold audio objects that don't need to trigger re-renders
+  const audioCtxRef = useRef(null); // shared Web Audio context
+  const streamRef = useRef(null); // microphone MediaStream
+  const processorRef = useRef(null); // ScriptProcessorNode (captures raw audio)
+  const sourceRef = useRef(null); // MediaStreamAudioSourceNode
+  const chunksRef = useRef([]); // raw Float32 audio chunks collected while recording
+  const isRecordingRef = useRef(false); // flag used inside the audio processor callback
+  const lastRecordingRef = useRef(null); // { float32, sampleRate, downsampled } — saved for playback
+  const myVoiceSourceRef = useRef(null); // AudioBufferSourceNode for "play my voice"
+  const serverVoiceSourceRef = useRef(null); // AudioBufferSourceNode for "play server voice"
 
+  // ── AudioContext ───────────────────────────────────────────────────────
+
+  // Returns the shared AudioContext, creating a new one if it was never
+  // opened or was closed after a previous session.
   const getAudioContext = useCallback(() => {
     if (!audioCtxRef.current || audioCtxRef.current.state === "closed") {
       audioCtxRef.current = new AudioContext();
@@ -39,11 +47,15 @@ export default function App() {
     return audioCtxRef.current;
   }, []);
 
+  // ── Recording ─────────────────────────────────────────────────────────
+
   const startRecording = useCallback(async () => {
     setErrorMsg("");
     lastRecordingRef.current = null;
     setHasRecording(false);
+
     try {
+      // Ask the browser for microphone permission
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: true,
         video: false,
@@ -53,18 +65,20 @@ export default function App() {
       const audioCtx = getAudioContext();
       if (audioCtx.state === "suspended") await audioCtx.resume();
 
+      // Build the audio graph: microphone → processor → destination
+      // The processor must be connected to destination or the browser may skip its callbacks
       const source = audioCtx.createMediaStreamSource(stream);
       sourceRef.current = source;
 
-      // bufferSize 4096 is a reasonable tradeoff for latency vs. overhead
-      const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+      const processor = audioCtx.createScriptProcessor(BUFFER_SIZE, 1, 1);
       processorRef.current = processor;
       chunksRef.current = [];
       isRecordingRef.current = true;
 
+      // Each callback gives us one buffer of audio — copy it because the
+      // underlying buffer is reused by the browser after the callback returns
       processor.onaudioprocess = (e) => {
         if (!isRecordingRef.current) return;
-        // Copy the channel data — the buffer is reused after this callback returns
         chunksRef.current.push(
           new Float32Array(e.inputBuffer.getChannelData(0)),
         );
@@ -73,10 +87,10 @@ export default function App() {
       source.connect(processor);
       processor.connect(audioCtx.destination);
 
-      setStatus("recording");
+      setStatus(STATUS.RECORDING);
     } catch (err) {
       setErrorMsg(`Microphone error: ${err.message}`);
-      setStatus("error");
+      setStatus(STATUS.ERROR);
     }
   }, [getAudioContext]);
 
@@ -84,29 +98,29 @@ export default function App() {
     if (!isRecordingRef.current) return;
     isRecordingRef.current = false;
 
-    // Tear down the recording graph
+    // Tear down the recording audio graph and release the microphone
     processorRef.current?.disconnect();
     sourceRef.current?.disconnect();
     streamRef.current?.getTracks().forEach((t) => t.stop());
 
     const audioCtx = getAudioContext();
     const inputSampleRate = audioCtx.sampleRate;
+
+    // Join all collected chunks into one array, then prepare the data for the server
     const merged = mergeChunks(chunksRef.current);
     chunksRef.current = [];
-
-    lastRecordingRef.current = { float32: merged, sampleRate: inputSampleRate };
-    setHasRecording(true);
 
     const downsampled = downsample(merged, inputSampleRate, TARGET_SAMPLE_RATE);
     const pcmBuffer = floatToPcm16(downsampled);
 
+    // Save the recording so the user can play it back with the buttons below
     lastRecordingRef.current = {
       float32: merged,
       sampleRate: inputSampleRate,
       downsampled,
     };
-
-    setStatus("processing");
+    setHasRecording(true);
+    setStatus(STATUS.PROCESSING);
 
     try {
       const response = await fetch(SERVER_URL, {
@@ -122,12 +136,15 @@ export default function App() {
       }
 
       const responseBuffer = await response.arrayBuffer();
+
+      // Empty response means the server had nothing to say — go back to idle
       if (responseBuffer.byteLength === 0) {
-        setStatus("idle");
+        setStatus(STATUS.IDLE);
         return;
       }
 
-      setStatus("playing");
+      // Decode and play the server's audio response
+      setStatus(STATUS.PLAYING);
       const audioBuffer = pcm16ToAudioBuffer(
         responseBuffer,
         audioCtx,
@@ -136,49 +153,25 @@ export default function App() {
       const playbackSource = audioCtx.createBufferSource();
       playbackSource.buffer = audioBuffer;
       playbackSource.connect(audioCtx.destination);
-      playbackSource.onended = () => setStatus("idle");
+      playbackSource.onended = () => setStatus(STATUS.IDLE);
       playbackSource.start();
     } catch (err) {
       setErrorMsg(`Request failed: ${err.message}`);
-      setStatus("error");
+      setStatus(STATUS.ERROR);
     }
   }, [getAudioContext]);
 
-  const handleMouseDown = useCallback(() => {
-    if (status === "idle" || status === "error") startRecording();
-  }, [status, startRecording]);
+  // ── Playback ───────────────────────────────────────────────────────────
 
-  const handleMouseUp = useCallback(() => {
-    if (status === "recording") stopRecordingAndSend();
-  }, [status, stopRecordingAndSend]);
-
-  // Keyboard accessibility: Space / Enter to hold-to-speak
-  const handleKeyDown = useCallback(
-    (e) => {
-      if ((e.key === " " || e.key === "Enter") && !e.repeat) {
-        e.preventDefault();
-        if (status === "idle" || status === "error") startRecording();
-      }
-    },
-    [status, startRecording],
-  );
-
-  const handleKeyUp = useCallback(
-    (e) => {
-      if (e.key === " " || e.key === "Enter") {
-        e.preventDefault();
-        if (status === "recording") stopRecordingAndSend();
-      }
-    },
-    [status, stopRecordingAndSend],
-  );
-
+  // Play back the raw microphone recording (full quality, original sample rate)
   const playMyVoice = useCallback(() => {
     if (!lastRecordingRef.current) return;
     const { float32, sampleRate } = lastRecordingRef.current;
+
     const audioCtx = getAudioContext();
     if (audioCtx.state === "suspended") audioCtx.resume();
 
+    // Stop any currently-playing "my voice" clip before starting a new one
     myVoiceSourceRef.current?.stop();
 
     const audioBuffer = audioCtx.createBuffer(1, float32.length, sampleRate);
@@ -187,15 +180,20 @@ export default function App() {
     const src = audioCtx.createBufferSource();
     src.buffer = audioBuffer;
     src.connect(audioCtx.destination);
-    src.onended = () => setStatus((s) => (s === "playingMyVoice" ? "idle" : s));
+    // Only reset to idle if this clip is still the active one when it ends
+    src.onended = () =>
+      setStatus((s) => (s === STATUS.PLAYING_MY_VOICE ? STATUS.IDLE : s));
     src.start();
+
     myVoiceSourceRef.current = src;
-    setStatus("playingMyVoice");
+    setStatus(STATUS.PLAYING_MY_VOICE);
   }, [getAudioContext]);
 
+  // Play back the downsampled version (what was actually sent to the server)
   const playServerVoice = useCallback(() => {
     if (!lastRecordingRef.current) return;
     const { downsampled } = lastRecordingRef.current;
+
     const audioCtx = getAudioContext();
     if (audioCtx.state === "suspended") audioCtx.resume();
 
@@ -212,106 +210,97 @@ export default function App() {
     src.buffer = audioBuffer;
     src.connect(audioCtx.destination);
     src.onended = () =>
-      setStatus((s) => (s === "playingServerVoice" ? "idle" : s));
+      setStatus((s) => (s === STATUS.PLAYING_SERVER_VOICE ? STATUS.IDLE : s));
     src.start();
+
     serverVoiceSourceRef.current = src;
-    setStatus("playingServerVoice");
+    setStatus(STATUS.PLAYING_SERVER_VOICE);
   }, [getAudioContext]);
 
-  const isDisabled =
-    status === "processing" ||
-    status === "playing" ||
-    status === "playingMyVoice" ||
-    status === "playingServerVoice";
+  // ── Event handlers ─────────────────────────────────────────────────────
 
-  const statusLabel = {
-    idle: "Hold to Speak",
-    recording: "Recording…",
-    processing: "Processing…",
-    playing: "Playing Response…",
-    playingMyVoice: "Playing Your Voice…",
-    playingServerVoice: "Playing Server Voice…",
-    error: "Hold to Speak",
-  }[status];
+  const handleMouseDown = useCallback(() => {
+    if (status === STATUS.IDLE || status === STATUS.ERROR) startRecording();
+  }, [status, startRecording]);
+
+  const handleMouseUp = useCallback(() => {
+    if (status === STATUS.RECORDING) stopRecordingAndSend();
+  }, [status, stopRecordingAndSend]);
+
+  // Keyboard accessibility: hold Space or Enter to record, release to send
+  const handleKeyDown = useCallback(
+    (e) => {
+      if ((e.key === " " || e.key === "Enter") && !e.repeat) {
+        e.preventDefault();
+        if (status === STATUS.IDLE || status === STATUS.ERROR) startRecording();
+      }
+    },
+    [status, startRecording],
+  );
+
+  const handleKeyUp = useCallback(
+    (e) => {
+      if (e.key === " " || e.key === "Enter") {
+        e.preventDefault();
+        if (status === STATUS.RECORDING) stopRecordingAndSend();
+      }
+    },
+    [status, stopRecordingAndSend],
+  );
+
+  // ── Derived UI values ──────────────────────────────────────────────────
+
+  // Mic button is disabled while audio is in-flight — only allow interaction at idle or error
+  const isMicDisabled =
+    status === STATUS.PROCESSING ||
+    status === STATUS.PLAYING ||
+    status === STATUS.PLAYING_MY_VOICE ||
+    status === STATUS.PLAYING_SERVER_VOICE;
+
+  const statusLabel = STATUS_LABELS[status];
+
+  // ── Render ─────────────────────────────────────────────────────────────
 
   return (
     <div className="app">
       <h1 className="app-title">Voice Interface</h1>
 
-      <button
-        className={`mic-button mic-button--${status}`}
+      <MicButton
+        status={status}
+        label={statusLabel}
+        disabled={isMicDisabled}
         onMouseDown={handleMouseDown}
         onMouseUp={handleMouseUp}
-        onTouchStart={(e) => {
-          e.preventDefault();
-          handleMouseDown();
-        }}
-        onTouchEnd={(e) => {
-          e.preventDefault();
-          handleMouseUp();
-        }}
         onKeyDown={handleKeyDown}
         onKeyUp={handleKeyUp}
-        disabled={isDisabled}
-        aria-label={statusLabel}
-      >
-        <MicIcon status={status} />
-      </button>
+      />
 
       <p className="status-label">{statusLabel}</p>
 
+      {/* Playback buttons appear only after the first recording */}
       {hasRecording && (
-        <button
-          className={`play-voice-button${status === "playingMyVoice" ? " play-voice-button--active" : ""}`}
+        <PlaybackButton
+          text="Play My Original Voice"
+          ariaLabel="Play my original voice"
+          isActive={status === STATUS.PLAYING_MY_VOICE}
+          isDisabled={isMicDisabled && status !== STATUS.PLAYING_MY_VOICE}
           onClick={playMyVoice}
-          disabled={isDisabled && status !== "playingMyVoice"}
-          aria-label="Play my original voice"
-        >
-          ▶ Play My Original Voice
-        </button>
+        />
       )}
 
       {hasRecording && (
-        <button
-          className={`play-voice-button${status === "playingServerVoice" ? " play-voice-button--active" : ""}`}
+        <PlaybackButton
+          text="Play Transformed Voice For Server"
+          ariaLabel="Play voice that send to server"
+          isActive={status === STATUS.PLAYING_SERVER_VOICE}
+          isDisabled={isMicDisabled && status !== STATUS.PLAYING_SERVER_VOICE}
           onClick={playServerVoice}
-          disabled={isDisabled && status !== "playingServerVoice"}
-          aria-label="Play voice that send to server"
-        >
-          ▶ Play Transformed Voice For Server
-        </button>
+        />
       )}
 
-      {status === "error" && errorMsg && (
+      {status === STATUS.ERROR && errorMsg && (
         <p className="error-msg">{errorMsg}</p>
       )}
     </div>
-  );
-}
-
-function MicIcon({ status }) {
-  return (
-    <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-      {status === "playing" ? (
-        // Speaker / waveform icon during playback
-        <>
-          <path d="M3 9v6h4l5 5V4L7 9H3z" />
-          <path
-            d="M16.5 12A4.5 4.5 0 0 0 14 7.97v8.05c1.48-.73 2.5-2.25 2.5-4.02z"
-            opacity=".7"
-          />
-          <path
-            d="M19 12c0 3.31-2.69 6-6 6v2c4.42 0 8-3.58 8-8s-3.58-8-8-8v2c3.31 0 6 2.69 6 6z"
-            opacity=".4"
-          />
-        </>
-      ) : (
-        // Microphone icon
-        <>
-          <path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3z" />
-          <path d="M17 11a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.93V21h2v-3.07A7 7 0 0 0 19 11h-2z" />
-        </>
-      )}
-    </svg>
   );
 }
